@@ -27,6 +27,11 @@ from analytics import observer
 from analytics.database import initialize_database
 from analytics.scheduler import analytics_scheduler
 
+from api.dashboard_api import (
+    start_dashboard_api,
+    stop_dashboard_api,
+)
+
 from language_engine.detector_bridge import (
     detect_message,
     learn_unknown_words,
@@ -69,6 +74,7 @@ async def load_features():
     await analytics.setup(bot)
     await objective.setup(bot)
     await analytics_access.setup(bot)
+
 
 @bot.event
 async def on_ready():
@@ -185,8 +191,9 @@ async def on_message(message):
 
 
 async def main():
-    initialize_database()
+    global scheduler_task
 
+    initialize_database()
     register_onboarding(bot)
 
     bot.add_listener(
@@ -194,20 +201,26 @@ async def main():
         "on_message",
     )
 
-    async with bot:
-        await load_features()
+    dashboard_runner = await start_dashboard_api(bot)
 
-        try:
-            await bot.start(DISCORD_TOKEN)
+    try:
+        async with bot:
+            await load_features()
 
-        finally:
-            if scheduler_task is not None:
-                scheduler_task.cancel()
+            try:
+                await bot.start(DISCORD_TOKEN)
 
-                try:
-                    await scheduler_task
-                except asyncio.CancelledError:
-                    pass
+            finally:
+                if scheduler_task is not None:
+                    scheduler_task.cancel()
+
+                    try:
+                        await scheduler_task
+                    except asyncio.CancelledError:
+                        pass
+
+    finally:
+        await stop_dashboard_api(dashboard_runner)
 
 
 print("Starting AI Server Assistant...")

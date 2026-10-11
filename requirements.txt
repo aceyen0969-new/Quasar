@@ -5,3 +5,4 @@ openai
 groq
 anthropic
 better-profanity
+aiohttp

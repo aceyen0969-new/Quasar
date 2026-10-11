@@ -6,3 +6,5 @@ venv/
 analytics/analytics.db
 language_engine/*.exe
 language_engine/training/learned/candidates.json
+
+Quasar-Deploy.zip
