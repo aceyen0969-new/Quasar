@@ -1,3 +1,4 @@
+
 import discord
 
 from security.approval import (
@@ -6,12 +7,10 @@ from security.approval import (
     get_approval_request,
     is_expired,
 )
-
 from security.actions import (
     ActionRequest,
     can_execute_after_approval,
 )
-
 from ai.action_executor import execute_action
 from security.policies import get_safety_decision
 
@@ -185,6 +184,17 @@ class ApprovalView(discord.ui.View):
             )
             return
 
+        print(
+            f"APPROVAL: Request {self.request_id} approved "
+            f"by {interaction.user.id}."
+        )
+
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException as error:
+            print(f"APPROVAL: Failed to acknowledge confirmation: {error!r}")
+            return
+
         await self.execute_approved_action(interaction, request)
 
     async def execute_approved_action(
@@ -192,28 +202,29 @@ class ApprovalView(discord.ui.View):
         interaction: discord.Interaction,
         request,
     ):
-        """Execute an action through the secured executor."""
-
         action = {
             "action": request.action,
             **request.data,
         }
 
-        success = await execute_action(
-            self.guild,
-            action,
-            reason=request.reason,
-            approval_request_id=self.request_id,
-        )
+        try:
+            success = await execute_action(
+                self.guild,
+                action,
+                reason=request.reason,
+                approval_request_id=self.request_id,
+            )
+        except Exception as error:
+            print(f"APPROVAL: Unexpected execution error: {error!r}")
+            success = False
 
         if not success:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=(
                     "The request was approved, but the action "
-                    "could not be completed. It may have failed "
-                    "a security check, or Discord may have "
-                    "rejected the operation.\n\n"
-                    "Check the bot's permissions and the target."
+                    "could not be completed.\n\n"
+                    "Check the bot's logs, permissions, target, "
+                    "and approval status."
                 ),
                 embed=None,
                 view=None,
@@ -228,10 +239,10 @@ class ApprovalView(discord.ui.View):
             category = self.guild.get_channel(category_id)
 
             if channel is None:
-                await interaction.response.edit_message(
+                await interaction.edit_original_response(
                     content=(
-                        "The channel was moved, but it could "
-                        "no longer be found."
+                        "The action completed, but the channel "
+                        "could no longer be found."
                     ),
                     embed=None,
                     view=None,
@@ -255,7 +266,7 @@ class ApprovalView(discord.ui.View):
             )
             embed.set_footer(text=f"Approved by {interaction.user}")
 
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 embed=embed,
                 view=None,
             )
@@ -283,13 +294,13 @@ class ApprovalView(discord.ui.View):
             )
             embed.set_footer(text=f"Approved by {interaction.user}")
 
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 embed=embed,
                 view=None,
             )
             return
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=(
                 f"The action `{request.action}` "
                 "was approved and executed."
@@ -364,5 +375,6 @@ class ApprovalView(discord.ui.View):
 
         await interaction.response.edit_message(
             content="Action cancelled.",
+            embed=None,
             view=None,
         )
