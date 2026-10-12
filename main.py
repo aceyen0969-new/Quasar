@@ -16,6 +16,7 @@ from commands import cleanup
 from commands import analytics
 from commands import objective
 from commands import analytics_access
+from commands import guardian
 
 from onboarding import register_onboarding
 
