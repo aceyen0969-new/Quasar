@@ -1,8 +1,9 @@
-
 import asyncio
+import time
 
 import discord
 
+from analytics.guardian_storage import record_guardian_incident
 from moderation.detector import SpamDetector
 from moderation.violations import violation_tracker
 
@@ -20,7 +21,6 @@ class ModerationManager:
             time_window=5,
             duplicate_limit=3,
         )
-
         self.alert_channel_name = "mod-logs"
 
     async def cleanup_warning(self, warning_message):
@@ -54,6 +54,7 @@ class ModerationManager:
         result,
         violation_count,
         delete_status,
+        incident_id,
     ):
         guild = message.guild
 
@@ -71,7 +72,10 @@ class ModerationManager:
             )
             return False
 
-        excerpt = message.content.strip() or "[No text content]"
+        excerpt = message.content.strip()
+
+        if not excerpt:
+            excerpt = "[No text content]"
 
         if len(excerpt) > 900:
             excerpt = excerpt[:897] + "..."
@@ -84,6 +88,12 @@ class ModerationManager:
             ),
             color=discord.Color.orange(),
             timestamp=discord.utils.utcnow(),
+        )
+
+        embed.add_field(
+            name="Incident ID",
+            value=str(incident_id),
+            inline=True,
         )
 
         embed.add_field(
@@ -130,7 +140,7 @@ class ModerationManager:
 
         embed.add_field(
             name="Spam deletion",
-            value=delete_status[:1024],
+            value=delete_status,
             inline=True,
         )
 
@@ -148,6 +158,7 @@ class ModerationManager:
                 "GUARDIAN ALERT SENT: "
                 f"guild={guild.id}, "
                 f"user={message.author.id}, "
+                f"incident={incident_id}, "
                 f"type={result['type']}",
                 flush=True,
             )
@@ -226,13 +237,9 @@ class ModerationManager:
 
             if delete_result["success"]:
                 delete_status = "Success"
-            elif delete_result.get("error") == "Message was already deleted.":
-                delete_status = (
-                    "Already deleted before Guardian completed its action"
-                )
             else:
                 delete_status = (
-                    f"Failed: {delete_result.get('error', 'Unknown error')}"
+                    f"Failed: {delete_result['error']}"
                 )
         else:
             delete_status = "Blocked by security policy"
@@ -240,7 +247,7 @@ class ModerationManager:
         if not result["new_incident"]:
             print(
                 "GUARDIAN: Spam continued within an existing "
-                f"incident; no duplicate alert. "
+                "incident; no duplicate alert. "
                 f"guild={guild_id}, user={user_id}, "
                 f"type={result['type']}, "
                 f"delete={delete_status}",
@@ -248,8 +255,23 @@ class ModerationManager:
             )
             return
 
+        incident_id = record_guardian_incident(
+            guild_id=guild_id,
+            user_id=user_id,
+            channel_id=message.channel.id,
+            message_id=message.id,
+            incident_type=result["type"],
+            reason=result["reason"],
+            message_excerpt=message.content.strip()[:500],
+            message_url=message.jump_url,
+            violation_count=violation_count,
+            deletion_status=delete_status,
+            detected_at=time.time(),
+        )
+
         print("----------------------------------------", flush=True)
         print("QUASAR GUARDIAN INCIDENT", flush=True)
+        print(f"Incident ID: {incident_id}", flush=True)
         print(f"Guild: {message.guild.name} ({guild_id})", flush=True)
         print(f"User: {message.author} ({user_id})", flush=True)
         print(f"Channel: {message.channel.name}", flush=True)
@@ -263,6 +285,7 @@ class ModerationManager:
             result=result,
             violation_count=violation_count,
             delete_status=delete_status,
+            incident_id=incident_id,
         )
 
         if violation_count == 2:
@@ -270,8 +293,7 @@ class ModerationManager:
                 warning_message = await message.channel.send(
                     f"⚠️ {message.author.mention}, "
                     "Quasar detected another spam incident. "
-                    "Please slow down and avoid repeating messages.",
-                    allowed_mentions=discord.AllowedMentions.none(),
+                    "Please slow down and avoid repeating messages."
                 )
 
                 asyncio.create_task(
