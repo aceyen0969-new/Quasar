@@ -1,5 +1,7 @@
+
 import asyncio
 import json
+import re
 
 from ai.providers import (
     ask_groq_json,
@@ -25,12 +27,31 @@ PROVIDERS = [
 PROVIDER_COOLDOWN = 30
 
 
+def extract_retry_seconds(error_text):
+    patterns = [
+        r"""retryDelay["']?\s*:\s*["']?(\d+(?:\.\d+)?)\s*s""",
+        r"""retry\s+(?:in|after)\s+(\d+)\s*(?:seconds?|secs?|s)\b""",
+        r"""retry[-_\s]?after\s*[:=]\s*["']?(\d+)""",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, error_text, re.IGNORECASE)
+
+        if match:
+            seconds = int(float(match.group(1)))
+
+            if seconds > 0:
+                return seconds
+
+    return None
+
+
 async def ask_with_fallback(prompt: str):
     for provider_name, function_name, timeout in PROVIDERS:
         if not is_available(provider_name):
             print(
                 f"AI PROVIDER: Skipping {provider_name} "
-                f"because it is in cooldown."
+                "because it is in cooldown."
             )
             continue
 
@@ -91,15 +112,25 @@ async def ask_with_fallback(prompt: str):
             )
 
         except Exception as error:
+            error_text = str(error)
+            retry_seconds = extract_retry_seconds(error_text)
+
+            cooldown = (
+                retry_seconds
+                if retry_seconds is not None
+                else PROVIDER_COOLDOWN
+            )
+
             print(
                 f"AI PROVIDER: {provider_name} failed."
             )
-            print(repr(error))
-
-            mark_failure(
-                provider_name,
-                PROVIDER_COOLDOWN,
+            print(error_text)
+            print(
+                f"AI PROVIDER: {provider_name} cooldown "
+                f"set to {cooldown}s."
             )
+
+            mark_failure(provider_name, cooldown)
 
     print("AI PROVIDER: All providers failed.")
 
