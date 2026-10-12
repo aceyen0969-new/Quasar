@@ -9,76 +9,167 @@ from moderation.violations import violation_tracker
 from security.actions import (
     ActionRequest,
     can_execute_automatically,
-    execute_action
+    execute_action,
 )
 
 
 class ModerationManager:
-
     def __init__(self):
-
         self.detector = SpamDetector(
             max_messages=5,
             time_window=5,
-            duplicate_limit=3
+            duplicate_limit=3,
         )
 
+        self.alert_channel_name = "mod-logs"
 
-    async def cleanup_warning(
-        self,
-        warning_message: discord.Message
-    ):
-
+    async def cleanup_warning(self, warning_message):
         await asyncio.sleep(10)
 
         try:
-
             await warning_message.delete()
-
-            print(
-                "🧹 Warning cleanup: SUCCESS"
-            )
+            print("GUARDIAN WARNING CLEANUP: SUCCESS", flush=True)
 
         except discord.NotFound:
-
             print(
-                "🧹 Warning cleanup: "
-                "already deleted."
+                "GUARDIAN WARNING CLEANUP: Already deleted.",
+                flush=True,
             )
 
         except discord.Forbidden:
-
             print(
-                "❌ Warning cleanup: "
-                "missing permission."
+                "GUARDIAN WARNING CLEANUP: Missing permission.",
+                flush=True,
             )
 
-        except discord.HTTPException as e:
-
+        except discord.HTTPException as error:
             print(
-                "❌ Warning cleanup: "
-                "Discord error."
+                f"GUARDIAN WARNING CLEANUP: {error}",
+                flush=True,
             )
 
-            print(e)
-
-        except Exception as e:
-
-            print(
-                "❌ Warning cleanup: "
-                "unexpected error."
-            )
-
-            print(
-                f"Error: {type(e).__name__}: {e}"
-            )
-
-
-    async def handle_message(
+    async def send_incident_alert(
         self,
-        message: discord.Message
+        message,
+        result,
+        violation_count,
+        delete_status,
     ):
+        guild = message.guild
 
+        alert_channel = discord.utils.get(
+            guild.text_channels,
+            name=self.alert_channel_name,
+        )
+
+        if alert_channel is None:
+            print(
+                "GUARDIAN ALERT ERROR: "
+                f"#{self.alert_channel_name} was not found "
+                f"in guild {guild.id}.",
+                flush=True,
+            )
+            return False
+
+        excerpt = message.content.strip() or "[No text content]"
+
+        if len(excerpt) > 900:
+            excerpt = excerpt[:897] + "..."
+
+        embed = discord.Embed(
+            title="Quasar Guardian: Spam Incident",
+            description=(
+                "A new spam incident was detected. "
+                "Review the evidence before taking further action."
+            ),
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow(),
+        )
+
+        embed.add_field(
+            name="Member",
+            value=f"{message.author} (`{message.author.id}`)",
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Channel",
+            value=message.channel.mention,
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Incident type",
+            value=result["type"],
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Incident count",
+            value=str(violation_count),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Reason",
+            value=result["reason"][:1024],
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Message excerpt",
+            value=excerpt,
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Message",
+            value=f"[Jump to message]({message.jump_url})",
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Spam deletion",
+            value=delete_status[:1024],
+            inline=True,
+        )
+
+        embed.set_footer(
+            text=f"Server: {guild.name} | Server ID: {guild.id}"
+        )
+
+        try:
+            await alert_channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+            print(
+                "GUARDIAN ALERT SENT: "
+                f"guild={guild.id}, "
+                f"user={message.author.id}, "
+                f"type={result['type']}",
+                flush=True,
+            )
+
+            return True
+
+        except discord.Forbidden:
+            print(
+                "GUARDIAN ALERT ERROR: Quasar cannot send "
+                f"messages in #{self.alert_channel_name}.",
+                flush=True,
+            )
+
+        except discord.HTTPException as error:
+            print(
+                f"GUARDIAN ALERT ERROR: {error}",
+                flush=True,
+            )
+
+        return False
+
+    async def handle_message(self, message):
         if message.author.bot:
             return
 
@@ -88,69 +179,28 @@ class ModerationManager:
         if not message.content.strip():
             return
 
-
-        # =============================================
-        # SPAM DETECTION
-        # =============================================
-
         result = self.detector.check_message(
             guild_id=message.guild.id,
             user_id=message.author.id,
-            content=message.content
+            content=message.content,
         )
 
         if not result["is_spam"]:
             return
 
+        guild_id = message.guild.id
+        user_id = message.author.id
 
-        # =============================================
-        # VIOLATION TRACKING
-        # =============================================
-
-        violation_count = (
-            violation_tracker.add_violation(
-                guild_id=message.guild.id,
-                user_id=message.author.id
+        if result["new_incident"]:
+            violation_count = violation_tracker.add_violation(
+                guild_id=guild_id,
+                user_id=user_id,
             )
-        )
-
-
-        print("----------------------------------------")
-        print("🛡️ AI Moderation")
-        print(f"User: {message.author}")
-        print(f"Type: {result['type']}")
-        print(f"Reason: {result['reason']}")
-        print(
-            f"Violation count: "
-            f"{violation_count}"
-        )
-
-
-        # =============================================
-        # ESCALATION
-        # =============================================
-
-        if violation_count == 1:
-
-            escalation = "delete"
-
-        elif violation_count == 2:
-
-            escalation = "warn"
-
         else:
-
-            escalation = "timeout"
-
-
-        print(
-            f"Escalation: {escalation}"
-        )
-
-
-        # =============================================
-        # DELETE SPAM
-        # =============================================
+            violation_count = violation_tracker.get_violations(
+                guild_id=guild_id,
+                user_id=user_id,
+            )
 
         delete_request = ActionRequest(
             action="delete_spam",
@@ -158,207 +208,102 @@ class ModerationManager:
             target_name=message.author.name,
             reason=result["reason"],
             data={
-                "guild_id": message.guild.id,
+                "guild_id": guild_id,
                 "channel_id": message.channel.id,
                 "message_id": message.id,
                 "spam_type": result["type"],
-                "violation_count": (
-                    violation_count
-                )
-            }
+                "violation_count": violation_count,
+            },
         )
 
+        delete_status = "Not attempted"
 
-        if can_execute_automatically(
-            delete_request
-        ):
-
+        if can_execute_automatically(delete_request):
             delete_result = await execute_action(
                 delete_request,
-                message=message
+                message=message,
             )
-
 
             if delete_result["success"]:
-
-                print(
-                    "Delete: SUCCESS"
+                delete_status = "Success"
+            elif delete_result.get("error") == "Message was already deleted.":
+                delete_status = (
+                    "Already deleted before Guardian completed its action"
                 )
-
             else:
-
-                print(
-                    "Delete: FAILED"
+                delete_status = (
+                    f"Failed: {delete_result.get('error', 'Unknown error')}"
                 )
+        else:
+            delete_status = "Blocked by security policy"
 
-                print(
-                    f"Reason: "
-                    f"{delete_result['error']}"
-                )
+        if not result["new_incident"]:
+            print(
+                "GUARDIAN: Spam continued within an existing "
+                f"incident; no duplicate alert. "
+                f"guild={guild_id}, user={user_id}, "
+                f"type={result['type']}, "
+                f"delete={delete_status}",
+                flush=True,
+            )
+            return
 
+        print("----------------------------------------", flush=True)
+        print("QUASAR GUARDIAN INCIDENT", flush=True)
+        print(f"Guild: {message.guild.name} ({guild_id})", flush=True)
+        print(f"User: {message.author} ({user_id})", flush=True)
+        print(f"Channel: {message.channel.name}", flush=True)
+        print(f"Type: {result['type']}", flush=True)
+        print(f"Reason: {result['reason']}", flush=True)
+        print(f"Incident count: {violation_count}", flush=True)
+        print(f"Spam deletion: {delete_status}", flush=True)
 
-        # =============================================
-        # WARNING
-        # =============================================
+        await self.send_incident_alert(
+            message=message,
+            result=result,
+            violation_count=violation_count,
+            delete_status=delete_status,
+        )
 
         if violation_count == 2:
-
-            print(
-                "⚠️ Entering warning system..."
-            )
-
             try:
-
-                print(
-                    "📨 Attempting to send "
-                    "warning message..."
+                warning_message = await message.channel.send(
+                    f"⚠️ {message.author.mention}, "
+                    "Quasar detected another spam incident. "
+                    "Please slow down and avoid repeating messages.",
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
-
-                warning_message = (
-                    await message.channel.send(
-                        f"⚠️ {message.author.mention}, "
-                        f"please stop spamming.\n\n"
-                        f"This is your "
-                        f"**2nd moderation violation**.\n"
-                        f"**Reason:** "
-                        f"{result['reason']}"
-                    )
-                )
-
-
-                print(
-                    "✅ Warning: SUCCESS"
-                )
-
-                print(
-                    f"Warning message ID: "
-                    f"{warning_message.id}"
-                )
-
 
                 asyncio.create_task(
-                    self.cleanup_warning(
-                        warning_message
-                    )
-                )
-
-
-                print(
-                    "🧹 Warning cleanup scheduled."
-                )
-
-
-            except discord.Forbidden as e:
-
-                print(
-                    "❌ Warning: FORBIDDEN"
+                    self.cleanup_warning(warning_message)
                 )
 
                 print(
-                    f"Error: {e}"
+                    "GUARDIAN: Second-incident warning sent.",
+                    flush=True,
                 )
 
-
-            except discord.HTTPException as e:
-
+            except discord.Forbidden:
                 print(
-                    "❌ Warning: "
-                    "DISCORD HTTP ERROR"
+                    "GUARDIAN WARNING ERROR: "
+                    "Missing permission to send messages.",
+                    flush=True,
                 )
 
+            except discord.HTTPException as error:
                 print(
-                    f"Error: {e}"
+                    f"GUARDIAN WARNING ERROR: {error}",
+                    flush=True,
                 )
 
-
-            except Exception as e:
-
-                print(
-                    "❌ Warning: "
-                    "UNEXPECTED ERROR"
-                )
-
-                print(
-                    f"Error type: "
-                    f"{type(e).__name__}"
-                )
-
-                print(
-                    f"Error: {e}"
-                )
-
-
-        # =============================================
-        # TIMEOUT
-        # =============================================
-
-        if violation_count >= 3:
-
-            timeout_request = ActionRequest(
-                action="timeout_member",
-                target_id=message.author.id,
-                target_name=message.author.name,
-                reason=(
-                    "Repeated spam violations. "
-                    f"Violation #{violation_count}."
-                ),
-                data={
-                    "guild_id": message.guild.id,
-                    "channel_id": (
-                        message.channel.id
-                    ),
-                    "duration_seconds": 60,
-                    "violation_count": (
-                        violation_count
-                    )
-                }
+        elif violation_count >= 3:
+            print(
+                "GUARDIAN REVIEW REQUIRED: Repeated incidents "
+                "detected. No automatic timeout was issued.",
+                flush=True,
             )
 
-
-            if can_execute_automatically(
-                timeout_request
-            ):
-
-                timeout_result = (
-                    await execute_action(
-                        timeout_request,
-                        member=message.author
-                    )
-                )
-
-
-                if timeout_result["success"]:
-
-                    print(
-                        "⏱️ Timeout: SUCCESS"
-                    )
-
-                    print(
-                        "Duration: "
-                        f"{timeout_result['duration_seconds']} "
-                        "seconds"
-                    )
-
-                else:
-
-                    print(
-                        "❌ Timeout: FAILED"
-                    )
-
-                    print(
-                        f"Reason: "
-                        f"{timeout_result['error']}"
-                    )
-
-            else:
-
-                print(
-                    "❌ Timeout: "
-                    "BLOCKED BY SECURITY POLICY"
-                )
-
-
-        print("----------------------------------------")
+        print("----------------------------------------", flush=True)
 
 
 moderation_manager = ModerationManager()
